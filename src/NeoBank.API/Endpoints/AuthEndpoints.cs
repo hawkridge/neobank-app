@@ -1,10 +1,14 @@
 using System.Security.Claims;
+using Microsoft.Extensions.Options;
+using NeoBank.API.Auth;
+using NeoBank.API.Configuration;
 using NeoBank.API.Endpoints.Validators;
 using NeoBank.API.Filters;
 using NeoBank.Application.Commands.Login;
 using NeoBank.Application.Commands.Logout;
 using NeoBank.Application.Commands.Refresh;
 using NeoBank.Application.Commands.Register;
+using NeoBank.Application.Configuration;
 
 namespace NeoBank.API.Endpoints;
 
@@ -47,37 +51,67 @@ public static class AuthEndpoints
     private static async Task<IResult> Login(
         LoginRequest req,
         LoginHandler handler,
+        HttpContext ctx,
+        IOptions<RefreshCookieSettings> cookieOptions,
+        IOptions<JwtSettings> jwtOptions,
         CancellationToken ct)
     {
         var result = await handler.HandleAsync(new LoginCommand(req.Email, req.Password), ct);
+        if (!result.IsSuccess)
+            return Results.Unauthorized();
 
-        return result.IsSuccess
-            ? Results.Ok(result.Value)
-            : Results.Unauthorized();
+        IssueRefreshCookie(ctx, result.Value.RefreshToken, cookieOptions.Value, jwtOptions.Value);
+        return Results.Ok(new AuthResponse(result.Value.AccessToken, result.Value.ExpiresIn));
     }
-    
+
     private static async Task<IResult> Refresh(
-        RefreshRequest req,
+        HttpContext ctx,
         RefreshHandler handler,
+        IOptions<RefreshCookieSettings> cookieOptions,
+        IOptions<JwtSettings> jwtOptions,
         CancellationToken ct)
-    {   
-        var result = await handler.HandleAsync(new RefreshCommand(req.RefreshToken), ct);
-        return result.IsSuccess ? Results.Ok(result.Value) : Results.Unauthorized();
+    {
+        var cookie = cookieOptions.Value;
+        var presented = RefreshTokenCookie.Read(ctx.Request, cookie);
+        if (string.IsNullOrEmpty(presented))
+            return Results.Unauthorized();
+
+        var result = await handler.HandleAsync(new RefreshCommand(presented), ct);
+        if (!result.IsSuccess)
+        {
+            RefreshTokenCookie.Delete(ctx.Response, cookie);
+            return Results.Unauthorized();
+        }
+
+        IssueRefreshCookie(ctx, result.Value.RefreshToken, cookie, jwtOptions.Value);
+        return Results.Ok(new AuthResponse(result.Value.AccessToken, result.Value.ExpiresIn));
     }
 
     private static async Task<IResult> Logout(
-        LogoutRequest req,
         HttpContext ctx,
         LogoutHandler handler,
+        IOptions<RefreshCookieSettings> cookieOptions,
         CancellationToken ct)
     {
         var userId = GetUserId(ctx);
         if (userId is null)
             return Results.Unauthorized();
 
+        var cookie = cookieOptions.Value;
+        var presented = RefreshTokenCookie.Read(ctx.Request, cookie);
+
         // Idempotent by design — always 204, whether or not the token existed.
-        await handler.HandleAsync(new LogoutCommand(userId.Value, req.RefreshToken), ct);
+        if (!string.IsNullOrEmpty(presented))
+            await handler.HandleAsync(new LogoutCommand(userId.Value, presented), ct);
+
+        RefreshTokenCookie.Delete(ctx.Response, cookie);
         return Results.NoContent();
+    }
+
+    private static void IssueRefreshCookie(HttpContext ctx, string token, RefreshCookieSettings cookie, JwtSettings jwt)
+    {
+        var expiresAt = DateTimeOffset.UtcNow.AddDays(jwt.RefreshTokenExpiryDays);
+        RefreshTokenCookie.Write(ctx.Response, token, expiresAt, cookie);
     }
 
     private static Guid? GetUserId(HttpContext ctx)
@@ -92,5 +126,4 @@ public static class AuthEndpoints
 
 public record RegisterRequest(string Email, string Password, string FirstName, string LastName, string PhoneNumber);
 public record LoginRequest(string Email, string Password);
-public record RefreshRequest(string RefreshToken);
-public record LogoutRequest(string RefreshToken);
+public record AuthResponse(string AccessToken, int ExpiresIn);

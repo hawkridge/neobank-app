@@ -4,6 +4,7 @@ using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using NeoBank.API.Configuration;
 using NeoBank.API.Endpoints;
 using NeoBank.API.Endpoints.Validators;
 using NeoBank.API.Middleware;
@@ -28,8 +29,24 @@ using Scalar.AspNetCore;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("Jwt"));
+builder.Services.Configure<RefreshCookieSettings>(builder.Configuration.GetSection("RefreshCookie"));
 
 var jwtSettings = builder.Configuration.GetSection("Jwt").Get<JwtSettings>()!;
+
+var corsSettings = builder.Configuration.GetSection("Cors").Get<CorsSettings>() ?? new CorsSettings();
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        if (corsSettings.AllowedOrigins.Length == 0)
+            return;
+
+        policy.WithOrigins(corsSettings.AllowedOrigins)
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
+});
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -95,6 +112,8 @@ if (app.Environment.IsDevelopment())
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseHttpsRedirection();
+
+app.UseCors();
 
 app.UseAuthentication();
 app.UseAuthorization();
